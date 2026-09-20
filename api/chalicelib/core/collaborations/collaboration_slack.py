@@ -1,0 +1,132 @@
+from datetime import datetime
+
+from decouple import config
+from fastapi import HTTPException, status
+
+import schemas
+from chalicelib.core import webhook
+from chalicelib.core.collaborations.collaboration_base import BaseCollaboration
+import logging
+
+from chalicelib.utils import ssrf
+from chalicelib.utils.log import sanitize
+
+logger = logging.getLogger(__name__)
+
+class Slack(BaseCollaboration):
+    @classmethod
+    def add(cls, tenant_id, data: schemas.AddCollaborationSchema):
+        if webhook.exists_by_name(tenant_id=tenant_id, name=data.name, exclude_id=None,
+                                  webhook_type=schemas.WebhookType.SLACK):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"name already exists.")
+        try:
+            hello = cls.say_hello(data.url)
+        except ValueError as e:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        if hello:
+            return webhook.add(tenant_id=tenant_id,
+                               endpoint=data.url.unicode_string(),
+                               webhook_type=schemas.WebhookType.SLACK,
+                               name=data.name)
+        return None
+
+    @classmethod
+    def say_hello(cls, url):
+        r = ssrf.post_json(
+            endpoint=url,
+            json_data={
+                "attachments": [
+                    {
+                        "text": "Welcome to OpenReplay",
+                        "ts": datetime.now().timestamp(),
+                    }
+                ]
+            })
+        if r.status_code != 200:
+            logger.error("slack integration failed")
+            logger.error(sanitize(r.text))
+            return False
+        return True
+
+    @classmethod
+    def send_raw(cls, tenant_id, webhook_id, body):
+        integration = cls.get_integration(tenant_id=tenant_id, integration_id=webhook_id)
+        if integration is None:
+            return {"errors": ["slack integration not found"]}
+        try:
+            r = ssrf.post_json(
+                endpoint=integration["endpoint"],
+                json_data=body,
+                timeout=5)
+            if r.status_code != 200:
+                logger.warning(f"!! issue sending slack raw; webhookId:{webhook_id} code:{r.status_code}")
+                logger.warning(sanitize(r.text))
+                return None
+        except requests.exceptions.Timeout:
+            logger.warning(f"!! Timeout sending slack raw webhookId:{webhook_id}")
+            return None
+        except Exception as e:
+            logger.warning(f"!! Issue sending slack raw webhookId:{webhook_id}")
+            logger.warning(sanitize(str(e)))
+            return None
+        return {"data": r.text}
+
+    @classmethod
+    def send_batch(cls, tenant_id, webhook_id, attachments):
+        integration = cls.get_integration(tenant_id=tenant_id, integration_id=webhook_id)
+        if integration is None:
+            return {"errors": ["slack integration not found"]}
+        logger.debug(f"====> sending slack batch notification: {len(attachments)}")
+        for i in range(0, len(attachments), 100):
+            r = ssrf.post_json(
+                endpoint=integration["endpoint"],
+                json_data={"attachments": attachments[i:i + 100]})
+            if r.status_code != 200:
+                logger.warning(f"!!!! something went wrong while sending slack batch; webhookId:{webhook_id} code:{r.status_code}")
+                logger.warning(sanitize(r.text))
+
+    @classmethod
+    def __share(cls, tenant_id, integration_id, attachement, extra=None):
+        if extra is None:
+            extra = {}
+        integration = cls.get_integration(tenant_id=tenant_id, integration_id=integration_id)
+        if integration is None:
+            return {"errors": ["slack integration not found"]}
+        attachement["ts"] = datetime.now().timestamp()
+        r = ssrf.post_json(endpoint=integration["endpoint"], json_data={"attachments": [attachement], **extra})
+        return r.text
+
+    @classmethod
+    def share_session(cls, tenant_id, project_id, session_id, user, comment, project_name=None, integration_id=None):
+        args = {"fallback": f"{user} has shared the below session!",
+                "pretext": f"{user} has shared the below session!",
+                "title": f"{config('SITE_URL')}/{project_id}/session/{session_id}",
+                "title_link": f"{config('SITE_URL')}/{project_id}/session/{session_id}",
+                "text": comment}
+        data = cls.__share(tenant_id, integration_id, attachement=args)
+        if "errors" in data:
+            return data
+        return {"data": data}
+
+    @classmethod
+    def share_error(cls, tenant_id, project_id, error_id, user, comment, project_name=None, integration_id=None):
+        args = {"fallback": f"{user} has shared the below error!",
+                "pretext": f"{user} has shared the below error!",
+                "title": f"{config('SITE_URL')}/{project_id}/errors/{error_id}",
+                "title_link": f"{config('SITE_URL')}/{project_id}/errors/{error_id}",
+                "text": comment}
+        data = cls.__share(tenant_id, integration_id, attachement=args)
+        if "errors" in data:
+            return data
+        return {"data": data}
+
+    @classmethod
+    def get_integration(cls, tenant_id, integration_id=None):
+        if integration_id is not None:
+            return webhook.get_webhook(tenant_id=tenant_id, webhook_id=integration_id,
+                                       webhook_type=schemas.WebhookType.SLACK)
+
+        integrations = webhook.get_by_type(tenant_id=tenant_id, webhook_type=schemas.WebhookType.SLACK)
+        if integrations is None or len(integrations) == 0:
+            return None
+        return integrations[0]

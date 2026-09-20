@@ -1,0 +1,44 @@
+package types
+
+import (
+	"context"
+	"time"
+)
+
+type Offsets map[string]map[int32]int64
+
+type RebalanceType int
+
+const (
+	RebalanceTypeAssign RebalanceType = iota
+	RebalanceTypeRevoke
+)
+
+type RebalanceHandler func(t RebalanceType, partitions []uint64)
+
+type PartitionsRebalancedEvent struct {
+	Type       RebalanceType
+	Partitions []uint64
+}
+
+const (
+	NoReadBackGap time.Duration = 0
+)
+
+// Consumer reads batches of session data from queue (redis or kafka)
+type Consumer interface {
+	ConsumeNext() error
+	CommitBack(gap int64) error
+	Commit() error
+	Ping(ctx context.Context) error
+	Close()
+}
+
+// Producer sends batches of session data to queue (redis or kafka)
+type Producer interface {
+	Produce(topic string, key uint64, value []byte) error
+	ProduceToPartition(topic string, partition, key uint64, value []byte) error
+	Ping(ctx context.Context) error
+	Flush(timeout int)
+	Close(timeout int)
+}

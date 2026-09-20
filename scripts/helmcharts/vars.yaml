@@ -1,0 +1,211 @@
+fromVersion: "v1.27.0"
+# Databases specific variables
+postgresql: &postgres
+  # For generating passwords
+  # `openssl rand -hex 20`
+  postgresqlPassword: "{{ randAlphaNum 20}}"
+  postgresqlHost: "postgresql.db.svc.cluster.local"
+  postgresqlPort: "5432"
+  postgresqlUser: "postgres"
+  postgresqlDatabase: "postgres"
+  # resources:
+  #   requests:
+  #     memory: 256Mi
+  #     cpu: 250m
+  #   limits:
+  #     memory: 3000Mi
+  # asdf
+  #     cpu: 2
+
+# For enterpriseEdition
+connector: &connector
+  enabled: false
+
+clickhouse: &clickhouse
+  enabled: true
+  chHost: clickhouse-openreplay-clickhouse.db.svc.cluster.local
+  username: default
+  password: ""
+  use_tls: false
+  service:
+    webPort: 8123
+    dataPort: 9000
+
+# Kept for backward compatibility. Will remove in future release
+quickwit: &quickwit
+
+kafka: &kafka
+  # For enterpriseEdition
+  enabled: false
+  kafkaHost: "kafka.db.svc.cluster.local"
+  # For now, clickhouse doesn't support zookeeper tls intgration.
+  # So we need http endpoint
+  zookeeperHost: "databases-zookeeper.svc.cluster.local"
+  zookeeperNonTLSPort: 2181
+  kafkaPort: "9092"
+  kafkaUseSsl: "false"
+  replicationFactor: "2"
+  maxMessageBytes: _3145728
+  # deleteTopicEnable: true
+  extraEnvVars:
+    - name: KAFKA_CFG_REPLICA_FETCH_MAX_BYTES
+      value: "3145728"
+    # This value already exists in the kafka values.yaml file, so overriding in top
+    # - name: KAFKA_CFG_MESSAGE_MAX_BYTES
+    #   value: "3000000"
+
+redis: &redis
+  enabled: true
+  redisHost: "redis-master.db.svc.cluster.local"
+  redisPort: "6379"
+
+minio:
+  # Disable this if you use an external object storage service (s3)
+  enabled: true
+  global:
+    minio:
+      # For generating passwords
+      # `openssl rand -hex 20`
+      accessKey: &accessKey "{{ randAlphaNum 20 }}"
+      secretKey: &secretKey "{{ randAlphaNum 20 }}"
+
+ingress-nginx: &ingress-nginx
+  # If you're using an external proxy in front of OpenReplay, update the proxy ports below.
+  # externalProxyPorts:
+  #   http: 80
+  #   https: 443
+  controller:
+    ingressClass:
+      name: openreplay
+      create: true
+      setAsDefaultIngress: false
+    ingressClassResource:
+      name: openreplay
+    enableSnippets: true
+    service:
+      externalTrafficPolicy: "Local"
+      ports:
+        http: 80
+        https: 443
+      httpPort:
+        enable: true
+        port: 80
+      httpsPort:
+        enable: true
+        port: 443
+    extraArgs:
+      default-server-secret: "app/openreplay-ssl"
+      enable-ewma: "true"
+    config:
+      entries:
+        use-gzip: "true"
+        enable-real-ip: "true"
+        real-ip-header: "X-Forwarded-For"
+        set-real-ip-from: "0.0.0.0/0"
+        ssl-redirect: "false"
+        client-max-body-size: "64m"
+        client-body-buffer-size: "512k"
+        server-tokens: "false"
+        proxy-connect-timeout: "120s"
+        proxy-read-timeout: "300s"
+        proxy-send-timeout: "300s"
+        proxy-protocol: "false"
+        use-forwarded-headers: "true"
+
+# Application specific variables
+global:
+  quickwit: *quickwit
+  ingress: *ingress-nginx
+  postgresql: *postgres
+  kafka: *kafka
+  redis: *redis
+  clickhouse: *clickhouse
+  connector: *connector
+  # Registry URL from where the OR images should be pulled.
+  openReplayContainerRegistry: "public.ecr.aws/p1t3u8a3"
+  # secret key to inject to assist and peers service
+  assistKey: "{{ randAlphaNum 20}}"
+  assistJWTSecret: "{{ randAlphaNum 20}}"
+  jwtSecret: "{{ randAlphaNum 20}}"
+  jwtSpotSecret: "{{ randAlphaNum 20}}"
+  tokenSecret: "{{randAlphaNum 20}}"
+  jwtRefreshSecret: "{{randAlphaNum 20}}"
+  jwtSpotRefreshSecret: "{{randAlphaNum 20}}"
+  # SCIM authentication secrets for chalice service (optional)
+  # Uncomment and set these values if SCIM authentication is required
+  # scimAccessSecretKey: "{{randAlphaNum 20}}"
+  # scimRefreshSecretKey: "{{randAlphaNum 20}}"
+  # In case of multiple nodes in the kubernetes cluster,
+  # we'll have to create an RWX PVC for shared components.
+  # If it's a single node, we'll use hostVolume, which is the default for the community/oss edition.
+  pvcRWXName: "hostPath"
+  s3:
+    region: "us-east-1"
+    # if you're using iam roles for authentication, keep the value empty.
+    # endpoint: ""
+    endpoint: "http://minio.db.svc.cluster.local:9000"
+    assetsBucket: "sessions-assets"
+    recordingsBucket: "mobs"
+    sourcemapsBucket: "sourcemaps"
+    spotsBucket: "spots"
+    # This is only for enterpriseEdition
+    assistRecordsBucket: "records"
+    vaultBucket: "vault-data"
+    # if you're using one node installation, where
+    # you're using local s3, make sure these variables
+    # are same as minio.global.minio.accesskey and  secretKey
+    accessKey: *accessKey
+    secretKey: *secretKey
+  email:
+    emailHost: ""
+    emailPort: "587"
+    emailUser: ""
+    emailPassword: ""
+    emailUseTls: "true"
+    emailUseSsl: "false"
+    emailSslKey: ""
+    emailSslCert: ""
+    emailFrom: "OpenReplay<do-not-reply@openreplay.com>"
+
+  # Only for ee
+  ee-components:
+    enabled: false
+  enterpriseEditionLicense: ""
+  # Optional: Use external secret for license key
+  license:
+    existingSecret: "license-key"
+    existingSecretKey: "or-license-key"
+  domainName: ""
+
+# chalice:
+  # env:
+    # captcha_server: ''
+    # captcha_key: ''
+    # SAML2_MD_URL: ''
+    # idp_entityId: ''
+    # idp_sso_url: ''
+    # idp_x509cert: ''
+    # idp_sls_url: ''
+    # idp_name: ''
+    # idp_tenantKey: ''
+    # enforce_SSO: 'false'
+    # SCIM_ACCESS_SECRET_KEY:
+    # SCIM_REFRESH_SECRET_KEY:
+    # SCIM_JWT_ALGORITHM: 'HS512'
+    # SCIM_ACCESS_TOKEN_EXPIRE_SECONDS: '86400'
+    # SCIM_REFRESH_TOKEN_EXPIRE_SECONDS: '2592000'
+# Below is an example on how to override values
+# chartname:
+#   filedFrom chart/Values.yaml:
+#     key: value
+#
+# For example (http):
+# http:
+#   resources:
+#     limits:
+#       cpu: 1024m
+#       memory: 4096Mi
+#     requests:
+#       cpu: 512m
+#       memory: 2056Mi
+

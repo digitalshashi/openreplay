@@ -1,0 +1,38 @@
+{
+  "name": "spot",
+  "description": "manifest.json description",
+  "private": true,
+  "version": "1.0.33",
+  "type": "module",
+  "scripts": {
+    "dev": "wxt",
+    "dev:firefox": "wxt -b firefox",
+    "build": "wxt build",
+    "build:firefox": "wxt build -b firefox",
+    "zip": "wxt zip",
+    "zip:firefox": "wxt zip -b firefox",
+    "compile": "tsc --noEmit",
+    "postinstall": "wxt prepare",
+    "prettier": "prettier --write ."
+  },
+  "dependencies": {
+    "@neodrag/solid": "^2.3.1",
+    "@openreplay/network-proxy": "^1.2.3",
+    "@tailwindcss/postcss": "^4.2.4",
+    "@tailwindcss/vite": "^4.2.4",
+    "@thedutchcoder/postcss-rem-to-px": "^0.0.2",
+    "autoprefixer": "^10.5.0",
+    "postcss": "^8.5.10",
+    "prettier": "^3.8.3",
+    "solid-js": "^1.9.15",
+    "tailwindcss": "4.2.4",
+    "web-vitals": "^5.2.0"
+  },
+  "devDependencies": {
+    "@wxt-dev/module-solid": "^1.1.4",
+    "daisyui": "5.5.19",
+    "typescript": "^5.9.3",
+    "wxt": "0.20.25"
+  },
+  "packageManager": "yarn@4.5.3"
+}

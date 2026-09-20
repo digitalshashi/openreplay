@@ -1,0 +1,150 @@
+{{- $kubeTargetVersion := .Capabilities.KubeVersion.GitVersion }}
+{{- if semverCompare ">=1.22.0-0" $kubeTargetVersion }}
+apiVersion: batch/v1
+{{- else }}
+apiVersion: batch/v1beta1
+{{- end }}
+kind: CronJob
+metadata:
+  name: efs-cleaner
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "utilities.labels" . | nindent 4 }}
+spec:
+  schedule: "{{ .Values.cron }}"
+  failedJobsHistoryLimit: 1
+  successfulJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      backoffLimit: 0 # Don't restart the failed jobs
+      template:
+        metadata:
+          {{- with .Values.podAnnotations }}
+          annotations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        spec:
+          restartPolicy: Never
+          {{- with .Values.nodeSelector }}
+          nodeSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.affinity }}
+          affinity:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.tolerations }}
+          tolerations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          containers:
+          - name: efs-cleaner
+            image: debian:stable-slim
+            command:
+            - /bin/sh
+            - -c
+            args:
+            - |
+              # Cleanup storage older than configured retention
+              # Strategy: scan top-level session dirs only (maxdepth 1),
+              # derive and delete correlated canvas/screenshots/devtools.
+              # Avoids expensive recursive find across 100k+ files.
+              set -u
+              export LC_ALL=C
+              export LANG=C
+
+              ROOT_DIR="/mnt/efs"
+              {{- $time := mul .Values.efsCleaner.retention 1440 }}
+              {{- if .Values.efsCleaner.retentionHours }}
+              {{- $time = mul .Values.efsCleaner.retentionHours 60 }}
+              {{- end }}
+              MINUTES_OLD={{ $time }}
+              THROTTLE_INTERVAL={{ .Values.efsCleaner.throttleInterval | default "0.1" }}
+
+              echo "=== EFS Cleanup ==="
+              echo "Retention: files older than ${MINUTES_OLD} minutes"
+              echo "Throttle: ${THROTTLE_INTERVAL}s between each rm -rf"
+              echo "Storage before:"
+              df -h "$ROOT_DIR"
+
+              COUNTFILE=$(mktemp)
+              echo 0 > "$COUNTFILE"
+
+              # Phase 1: Scan top-level entries (maxdepth 1), skip canvas/screenshots dirs.
+              # For each old session dir, also delete correlated canvas/screenshots/devtools.
+              echo "--- Phase 1: Session cleanup ---"
+              find "$ROOT_DIR" -mindepth 1 -maxdepth 1 \
+                ! -name "canvas" \
+                ! -name "screenshots" \
+                -mmin +"$MINUTES_OLD" \
+                -print 2>/dev/null | while IFS= read -r filepath; do
+                basename=$(basename "$filepath")
+
+                # Delete main session dir/file
+                ionice -c 2 -n 7 nice -n 19 rm -rf "$filepath" 2>/dev/null || true
+
+                # Delete correlated devtools (sibling file: <session_id>devtools)
+                ionice -c 2 -n 7 nice -n 19 rm -rf "${filepath}devtools" 2>/dev/null || true
+
+                # Delete correlated canvas dir
+                if [ -d "${ROOT_DIR}/canvas/${basename}" ]; then
+                  ionice -c 2 -n 7 nice -n 19 rm -rf "${ROOT_DIR}/canvas/${basename}" 2>/dev/null || true
+                fi
+
+                # Delete correlated screenshots dir
+                if [ -d "${ROOT_DIR}/screenshots/${basename}" ]; then
+                  ionice -c 2 -n 7 nice -n 19 rm -rf "${ROOT_DIR}/screenshots/${basename}" 2>/dev/null || true
+                fi
+
+                # Count via file (while loop runs in subshell due to pipe)
+                c=$(cat "$COUNTFILE")
+                c=$((c + 1))
+                echo "$c" > "$COUNTFILE"
+                if [ $((c % 1000)) -eq 0 ]; then
+                  echo "Progress: ${c} sessions cleaned"
+                fi
+
+                # Throttle to avoid saturating EBS IOPS
+                sleep "$THROTTLE_INTERVAL"
+              done
+              echo "Phase 1 complete: $(cat "$COUNTFILE") sessions cleaned"
+
+              # Phase 2: Cleanup orphaned canvas/screenshots dirs
+              # (sessions already deleted by other means, but canvas/screenshots left behind)
+              echo "--- Phase 2: Orphan cleanup ---"
+              echo 0 > "$COUNTFILE"
+              for subdir in canvas screenshots; do
+                if [ -d "${ROOT_DIR}/${subdir}" ]; then
+                  find "${ROOT_DIR}/${subdir}" -mindepth 1 -maxdepth 1 -type d \
+                    -mmin +"$MINUTES_OLD" \
+                    -print 2>/dev/null | while IFS= read -r orphan; do
+                    ionice -c 2 -n 7 nice -n 19 rm -rf "$orphan" 2>/dev/null || true
+                    c=$(cat "$COUNTFILE")
+                    echo $((c + 1)) > "$COUNTFILE"
+                    sleep "$THROTTLE_INTERVAL"
+                  done
+                fi
+              done
+              echo "Phase 2 complete: $(cat "$COUNTFILE") orphans cleaned"
+              rm -f "$COUNTFILE"
+
+              echo "=== Cleanup done ==="
+              echo "Storage after:"
+              df -h "$ROOT_DIR"
+            volumeMounts:
+            - mountPath: /mnt/efs
+              name: datadir
+          {{- if eq (tpl .Values.efsCleaner.pvc.name . ) "hostPath" }}
+          volumes:
+          - name: datadir
+            hostPath:
+              # Ensure the file directory is created.
+              path: {{ tpl .Values.efsCleaner.pvc.hostMountPath . }}
+              type: DirectoryOrCreate
+          {{- else }}
+          volumes:
+          - name: datadir
+            persistentVolumeClaim:
+              claimName: {{ tpl .Values.efsCleaner.pvc.name . }}
+          {{- end }}
+

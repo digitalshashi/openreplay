@@ -1,0 +1,155 @@
+package main
+
+import (
+	"context"
+
+	config "openreplay/backend/internal/config/db"
+	"openreplay/backend/internal/db"
+	"openreplay/backend/internal/db/datasaver"
+	"openreplay/backend/pkg/canvas"
+	"openreplay/backend/pkg/db/clickhouse"
+	"openreplay/backend/pkg/db/postgres/pool"
+	"openreplay/backend/pkg/db/redis"
+	"openreplay/backend/pkg/health"
+	"openreplay/backend/pkg/issues"
+	"openreplay/backend/pkg/logger"
+	"openreplay/backend/pkg/messages"
+	"openreplay/backend/pkg/metrics"
+	"openreplay/backend/pkg/metrics/database"
+	"openreplay/backend/pkg/projects"
+	"openreplay/backend/pkg/queue"
+	"openreplay/backend/pkg/queue/types"
+	sdk "openreplay/backend/pkg/sdk/service"
+	"openreplay/backend/pkg/sessions"
+	"openreplay/backend/pkg/tags"
+	"openreplay/backend/pkg/terminator"
+)
+
+func main() {
+	ctx := context.Background()
+	log := logger.New()
+	cfg := config.New(log)
+
+	h := health.New()
+
+	dbMetric := database.New("db")
+	metrics.New(log, dbMetric.List())
+
+	pgConn, err := pool.New(dbMetric, cfg.Postgres.String())
+	if err != nil {
+		log.Fatal(ctx, "can't init postgres connection: %s", err)
+	}
+	defer pgConn.Close()
+	h.Register("postgres", func(ctx context.Context) error {
+		return pgConn.Ping(ctx)
+	})
+
+	chConn, err := clickhouse.NewConnection(cfg.Clickhouse)
+	if err != nil {
+		log.Fatal(ctx, "can't init clickhouse connection: %s", err)
+	}
+	h.Register("clickhouse", func(ctx context.Context) error {
+		return chConn.Ping(ctx)
+	})
+
+	redisConn, err := redis.New(&cfg.Redis)
+	if err != nil {
+		log.Warn(ctx, "can't init redis connection: %s", err)
+	}
+	defer redisConn.Close()
+	h.Register("redis", func(ctx context.Context) error {
+		return redisConn.Ping(ctx)
+	})
+
+	issuesManager, err := issues.New(log, redisConn, cfg.IssuesFlushInterval)
+	if err != nil {
+		log.Fatal(ctx, "can't init issues keeper: %s", err)
+	}
+
+	chConnector, err := clickhouse.NewConnector(log, chConn, dbMetric, cfg.CHBatchSizeLimit, cfg.CHWorkerQueueDepth, cfg.CHSendWorkers)
+	if err != nil {
+		log.Fatal(ctx, "can't prepare clickhouse connector: %s", err)
+	}
+	defer chConnector.Stop()
+
+	projManager := projects.New(log, pgConn, redisConn, dbMetric)
+	sessManager := sessions.New(log, pgConn, projManager, redisConn, dbMetric, sessions.IgnoreInactiveProjects)
+	tagsManager := tags.New(log, pgConn)
+
+	canvases, err := canvas.New(log, pgConn, dbMetric)
+	if err != nil {
+		log.Fatal(ctx, "can't init project service: %s", err)
+	}
+
+	users, err := sdk.NewUsers(log, chConn, sessManager)
+	if err != nil {
+		log.Fatal(ctx, "can't init users: %s", err)
+	}
+
+	saver := datasaver.New(log, cfg, chConnector, sessManager, issuesManager, tagsManager, canvases, users)
+
+	msgFilter := []int{
+		// Web messages
+		messages.MsgMetadata, messages.MsgIssueEvent, messages.MsgSessionStart, messages.MsgSessionEnd,
+		messages.MsgUserID, messages.MsgUserAnonymousID, messages.MsgPerformanceTrackAggr,
+		messages.MsgJSException, messages.MsgResourceTiming, messages.MsgCustomEvent, messages.MsgCustomIssue,
+		messages.MsgNetworkRequest, messages.MsgGraphQL, messages.MsgStateAction, messages.MsgMouseClick,
+		messages.MsgMouseClickDeprecated, messages.MsgSetPageLocation, messages.MsgSetPageLocationDeprecated,
+		messages.MsgPageLoadTiming, messages.MsgPageRenderTiming,
+		messages.MsgPageEvent, messages.MsgPageEventDeprecated, messages.MsgMouseThrashing, messages.MsgInputChange,
+		messages.MsgUnbindNodes, messages.MsgTagTrigger, messages.MsgIncident, messages.MsgCanvasNode,
+		// Mobile messages
+		messages.MsgMobileSessionStart, messages.MsgMobileSessionEnd, messages.MsgMobileUserID, messages.MsgMobileUserAnonymousID,
+		messages.MsgMobileMetadata, messages.MsgMobileEvent, messages.MsgMobileNetworkCall,
+		messages.MsgMobileClickEvent, messages.MsgMobileSwipeEvent, messages.MsgMobileInputEvent,
+		messages.MsgMobileCrash, messages.MsgMobileIssueEvent,
+	}
+
+	// Init consumer
+	consumer, err := queue.NewConsumer(
+		log,
+		cfg.GroupDB,
+		[]string{
+			cfg.TopicRawWeb,
+			cfg.TopicRawMobile,
+			cfg.TopicAnalytics,
+		},
+		messages.NewMessageIterator(log, saver.Handle, msgFilter, true),
+		false,
+		cfg.MessageSizeLimit,
+		func(t types.RebalanceType, _ []uint64) {
+			if t != types.RebalanceTypeRevoke {
+				return
+			}
+			if err := issuesManager.Flush(); err != nil {
+				log.Error(ctx, "rebalance issues flush error: %s", err)
+			}
+			sessManager.Commit()
+		},
+		types.NoReadBackGap,
+	)
+	if err != nil {
+		log.Fatal(ctx, "can't init message consumer: %s", err)
+	}
+	if oc, ok := consumer.(interface {
+		clickhouse.OffsetCommitter
+		SetProcessedHook(func(topic string, partition int32, offset int64))
+	}); ok {
+		chConnector.SetCommitter(oc)
+		oc.SetProcessedHook(chConnector.OnBatchEnd)
+	}
+	h.Register("consumer", func(ctx context.Context) error {
+		return consumer.Ping(ctx)
+	})
+
+	sdkSaver, err := sdk.New(cfg, log, chConnector, sessManager, users, chConn, redisConn)
+	if err != nil {
+		log.Fatal(ctx, "can't init sdk saver: %s", err)
+	}
+	defer sdkSaver.Stop()
+
+	// Run service and wait for TERM signal
+	service := db.New(log, cfg, consumer, saver, sessManager)
+	log.Info(ctx, "Db service started")
+	terminator.Wait(log, service)
+}

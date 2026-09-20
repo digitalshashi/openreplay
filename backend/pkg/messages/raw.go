@@ -1,0 +1,62 @@
+package messages
+
+// RawMessage is a not decoded message
+type RawMessage struct {
+	tp        uint64
+	data      []byte
+	broken    *bool
+	meta      message
+	decodeErr error
+}
+
+func (m *RawMessage) Encode() []byte {
+	return m.data
+}
+
+func (m *RawMessage) Decode() Message {
+	reader := bytesReaderImpl{data: m.data[1:]}
+	msg, err := ReadMessage(m.tp, &reader)
+	if err != nil {
+		m.decodeErr = err
+		*m.broken = true
+		return nil
+	}
+	msg = transformDeprecated(msg)
+	msg.Meta().SetMeta(&m.meta)
+	return msg
+}
+
+func (m *RawMessage) MobileTimestamp() uint64 {
+	if len(m.data) < 2 || !IsMobileType(int(m.tp)) {
+		return m.meta.Timestamp
+	}
+	reader := bytesReaderImpl{data: m.data[1:]}
+	ts, err := reader.ReadUint()
+	if err != nil {
+		return m.meta.Timestamp
+	}
+	return ts
+}
+
+func (m *RawMessage) TypeID() int {
+	return int(m.tp)
+}
+
+func (m *RawMessage) Meta() *message {
+	return &m.meta
+}
+
+func (m *RawMessage) SessionID() uint64 {
+	if m.meta.batch != nil {
+		return m.meta.batch.sessionID
+	}
+	return 0
+}
+
+func (m *RawMessage) MsgID() uint64 {
+	return m.meta.Index
+}
+
+func (m *RawMessage) Time() uint64 {
+	return m.meta.Timestamp
+}

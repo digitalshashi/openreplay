@@ -1,0 +1,60 @@
+import { declineCall, acceptCall, cross, remoteControl, } from '../icons.js'
+import type { ButtonOptions, ConfirmWindowOptions, } from './ConfirmWindow.js'
+
+
+const TEXT_GRANT_REMORTE_ACCESS = 'Grant Remote Control'
+const TEXT_REJECT = 'Reject'
+const TEXT_ANSWER_CALL = 'Answer'
+const TEXT_ACCEPT_RECORDING = 'Allow Recording'
+const TEXT_ALLOW_SESSION = 'Allow'
+
+export type Options = string | Partial<ConfirmWindowOptions>;
+
+function confirmDefault(
+  opts: Options,
+  confirmBtn: ButtonOptions,
+  declineBtn: ButtonOptions,
+  text: string
+): ConfirmWindowOptions {
+  const isStr = typeof opts === 'string'
+  return Object.assign(
+    {
+      text: isStr ? opts : text,
+      confirmBtn,
+      declineBtn,
+    },
+    isStr ? undefined : opts
+  )
+}
+
+export const callConfirmDefault = (opts: Options) =>
+  confirmDefault(
+    opts,
+    TEXT_ANSWER_CALL,
+    TEXT_REJECT,
+    'You have an incoming call. Do you want to answer?'
+  )
+
+export const controlConfirmDefault = (opts: Options) =>
+  confirmDefault(
+    opts,
+    TEXT_GRANT_REMORTE_ACCESS,
+    TEXT_REJECT,
+    'Agent requested remote control. Allow?'
+  )
+
+export const recordRequestDefault = (opts: Options) =>
+    confirmDefault(
+      opts,
+      TEXT_ACCEPT_RECORDING,
+      TEXT_REJECT,
+      'Agent requested to record activity in this browser tab.'
+    )
+
+export const sessionConfirmDefault = (opts: Options) =>
+    confirmDefault(
+      opts,
+      TEXT_ALLOW_SESSION,
+      TEXT_REJECT,
+      'Agent requested to view this session live. Allow?'
+    )

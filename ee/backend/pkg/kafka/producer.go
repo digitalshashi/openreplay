@@ -1,0 +1,140 @@
+package kafka
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log"
+	"os"
+	"time"
+
+	"openreplay/backend/pkg/env"
+
+	"github.com/confluentinc/confluent-kafka-go/v2/kafka"
+)
+
+const queueFullBackoff = 100 * time.Millisecond
+
+type Producer struct {
+	producer *kafka.Producer
+}
+
+func NewProducer(messageSizeLimit int, useBatch bool) *Producer {
+	kafkaConfig := &kafka.ConfigMap{
+		"enable.idempotence":                    true,
+		"bootstrap.servers":                     env.String("KAFKA_SERVERS"),
+		"go.delivery.reports":                   env.Bool("KAFKA_DELIVERY_REPORTS"),
+		"go.delivery.report.fields":             "key",
+		"security.protocol":                     "plaintext",
+		"go.batch.producer":                     useBatch,
+		"message.max.bytes":                     messageSizeLimit, // should be synced with broker config
+		"linger.ms":                             1000,
+		"queue.buffering.max.ms":                1000,
+		"batch.num.messages":                    1000,
+		"queue.buffering.max.messages":          50000,
+		"queue.buffering.max.kbytes":            131072, // 128 MiB un-acked buffer cap (default 1 GiB)
+		"retry.backoff.ms":                      100,
+		"max.in.flight.requests.per.connection": 1,
+		"compression.type":                      env.String("COMPRESSION_TYPE"),
+	}
+	// Apply ssl configuration
+	if env.Bool("KAFKA_USE_SSL") {
+		kafkaConfig.SetKey("security.protocol", "ssl")
+		kafkaConfig.SetKey("ssl.ca.location", os.Getenv("KAFKA_SSL_CA"))
+		kafkaConfig.SetKey("ssl.key.location", os.Getenv("KAFKA_SSL_KEY"))
+		kafkaConfig.SetKey("ssl.certificate.location", os.Getenv("KAFKA_SSL_CERT"))
+	}
+	// Apply Kerberos configuration
+	if env.Bool("KAFKA_USE_KERBEROS") {
+		kafkaConfig.SetKey("security.protocol", "sasl_plaintext")
+		kafkaConfig.SetKey("sasl.mechanisms", "GSSAPI")
+		kafkaConfig.SetKey("sasl.kerberos.service.name", os.Getenv("KERBEROS_SERVICE_NAME"))
+		kafkaConfig.SetKey("sasl.kerberos.principal", os.Getenv("KERBEROS_PRINCIPAL"))
+		kafkaConfig.SetKey("sasl.kerberos.keytab", os.Getenv("KERBEROS_KEYTAB_LOCATION"))
+	}
+
+	producer, err := kafka.NewProducer(kafkaConfig)
+	if err != nil {
+		log.Fatalln(err)
+	}
+	newProducer := &Producer{producer}
+	go newProducer.errorHandler()
+	return newProducer
+}
+
+func (p *Producer) errorHandler() {
+	for e := range p.producer.Events() {
+		switch ev := e.(type) {
+		case *kafka.Message:
+			if ev.TopicPartition.Error != nil {
+				fmt.Printf("Delivery failed: topicPartition: %v, key: %d\n", ev.TopicPartition, decodeKey(ev.Key))
+			}
+		case kafka.Error:
+			if ev.IsFatal() {
+				log.Printf("kafka producer entered fatal state, all produce calls will fail until restart: %v\n", ev)
+			}
+		}
+	}
+}
+
+func (p *Producer) produceWithRetry(msg *kafka.Message) error {
+	for {
+		err := p.producer.Produce(msg, nil)
+		if err == nil {
+			return nil
+		}
+		var kErr kafka.Error
+		if !errors.As(err, &kErr) {
+			return err
+		}
+		if kErr.Code() == kafka.ErrFatal {
+			if fatal := p.producer.GetFatalError(); fatal != nil {
+				return fatal
+			}
+			return err
+		}
+		if kErr.Code() != kafka.ErrQueueFull {
+			return err
+		}
+		time.Sleep(queueFullBackoff)
+	}
+}
+
+func (p *Producer) Produce(topic string, key uint64, value []byte) error {
+	return p.produceWithRetry(&kafka.Message{
+		TopicPartition: kafka.TopicPartition{Topic: &topic, Partition: getKeyPartition(key)},
+		Key:            encodeKey(key),
+		Value:          value,
+	})
+}
+
+func (p *Producer) ProduceToPartition(topic string, partition, key uint64, value []byte) error {
+	return p.produceWithRetry(&kafka.Message{
+		TopicPartition: kafka.TopicPartition{Topic: &topic, Partition: int32(partition)},
+		Key:            encodeKey(key),
+		Value:          value,
+	})
+}
+
+func (p *Producer) Ping(ctx context.Context) error {
+	if err := p.producer.GetFatalError(); err != nil {
+		return err
+	}
+	timeoutMs := 5000
+	if deadline, ok := ctx.Deadline(); ok {
+		if ms := int(time.Until(deadline).Milliseconds()); ms > 0 {
+			timeoutMs = ms
+		}
+	}
+	_, err := p.producer.GetMetadata(nil, true, timeoutMs)
+	return err
+}
+
+func (p *Producer) Close(timeoutMs int) {
+	p.producer.Flush(timeoutMs)
+	p.producer.Close()
+}
+
+func (p *Producer) Flush(timeoutMs int) {
+	p.producer.Flush(timeoutMs)
+}

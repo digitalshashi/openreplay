@@ -1,0 +1,42 @@
+import { defineConfig } from "wxt";
+import tailwindcss from "@tailwindcss/vite";
+
+// See https://wxt.dev/api/config.html
+export default defineConfig({
+  modules: ["@wxt-dev/module-solid"],
+  manifest: {
+    name: "__MSG_extName__",
+    description: "__MSG_extDescription__",
+    default_locale: "en",
+    host_permissions: ["<all_urls>"],
+    content_security_policy: {
+      extension_pages:
+        "script-src 'self' 'wasm-unsafe-eval'; object-src 'self';",
+      sandbox:
+        "sandbox allow-scripts allow-forms allow-popups allow-modals; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'; child-src 'self';",
+    },
+    web_accessible_resources: [
+      {
+        resources: ["injected.js", "notifications.js", "/content-scripts/content.css"],
+        matches: ["<all_urls>"],
+      },
+    ],
+    permissions: [
+      "storage",
+      "tabCapture",
+      "offscreen",
+      "unlimitedStorage",
+      "webNavigation",
+      "webRequest",
+      "debugger",
+    ],
+  },
+  webExt: {
+    chromiumArgs: ['--user-data-dir=./.wxt/chrome-data'],
+  },
+  vite: (env) => ({
+    plugins: [tailwindcss()],
+    resolve: {
+      conditions: ['development', 'browser', 'module', 'default'],
+    }}),
+});

@@ -1,0 +1,28 @@
+{{- if .Values.ingress.enabled -}}
+{{- $fullName := include "images.fullname" . -}}
+{{- $svcPort := .Values.service.ports.http -}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $fullName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "images.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  ingressClassName: {{ tpl .Values.ingress.className . }}
+  rules:
+    - host: {{ .Values.global.domainName }}
+      http:
+        paths:
+          - pathType: Prefix
+            backend:
+              service:
+                name: {{ $fullName }}
+                port:
+                  number: {{ $svcPort }}
+            path: /ingest/v1/mobile/images
+{{- end }}

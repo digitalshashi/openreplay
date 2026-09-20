@@ -1,0 +1,11 @@
+public
+.cache
+node_modules
+*DS_Store
+*.env
+*.log
+**/*.envrc
+.idea
+*.mob*
+install-state.gz
+frontend/tests/playwright/auth-state.json
